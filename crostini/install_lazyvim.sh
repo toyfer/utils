@@ -1,5 +1,5 @@
-#!/bin/bash
-# Crostini用LazyVim自動最新版インストールスクリプト
+#!//bash/bash
+# Crostini用LazyVim完全自動インストールスクリプト
 
 set -e
 
@@ -18,13 +18,61 @@ error() {
     exit 1
 }
 
+warning() {
+    echo -e "${YELLOW}[WARNING] $1${NC}"
+}
+
+# 依存関係のインストール
+install_dependencies() {
+    log "依存関係をインストール中..."
+    
+    # 基本パッケージ
+    local basic_deps=(
+        git
+        curl
+        wget
+        unzip
+        tar
+        gzip
+    )
+    
+    # LazyVim用パッケージ
+    local lazyvim_deps=(
+        ripgrep
+        fd-find
+        nodejs
+        npm
+        python3
+        python3-pip
+        build-essential
+        cmake
+    )
+    
+    # Crostini用パッケージ
+    local crostini_deps=(
+        xclip
+        fonts-noto-color-emoji
+    )
+    
+    # 全パッケージを結合
+    local all_deps=("${basic_deps[@]}" "${lazyvim_deps[@]}" "${crostini_deps[@]}")
+    
+    sudo apt update
+    sudo apt install -y "${all_deps[@]}"
+    
+    # fd-findのエイリアスを作成（fdコマンドを使えるように）
+    if command -v fdfind &> /dev/null && ! command -v fd &> /dev/null; then
+        sudo ln -sf /usr/bin/fdfind /usr/local/bin/fd
+    fi
+    
+    log "依存関係のインストール完了"
+}
+
 # 最新版のNeovimを自動取得
 get_latest_nvim_version() {
     log "最新のNeovimバージョンを確認中..."
     
-    # GitHub APIから最新リリースを取得
-    local latest_url="https://api.github.com/repos/neovim/neovim/releases/latest"
-    local version=$(curl -s "$latest_url" | grep -o '"tag_name": "v[^"]*' | cut -d'"' -f4)
+    local version=$(curl -s "https://api.github.com/repos/neovim/neovim/releases/latest" | grep -o '"tag_name": "v[^"]*' | cut -d'"' -f4)
     
     if [ -z "$version" ]; then
         error "最新バージョンの取得に失敗しました"
@@ -33,78 +81,85 @@ get_latest_nvim_version() {
     echo "$version"
 }
 
-# セキュアなダウンロードと検証
-download_and_verify() {
-    local version=$1
-    local appimage="nvim.appimage"
-    local url="https://github.com/neovim/neovim/releases/download/${version}/nvim.appimage"
+# セキュアなダウンロード
+download_file() {
+    local url=$1
+    local output=$2
     
-    log "Neovim ${version} をダウンロード中..."
-    
-    # ダウンロード
-    if ! wget -q --show-progress -O "/tmp/${appimage}" "$url"; then
-        error "ダウンロードに失敗しました"
-    fi
-    
-    # 実行権限を付与
-    chmod +x "/tmp/${appimage}"
-    
-    # 簡易的な整合性チェック（ファイルサイズで確認）
-    local file_size=$(stat -c%s "/tmp/${appimage}")
-    if [ "$file_size" -lt 10000000 ]; then  # 10MB未満は異常
-        error "ダウンロードしたファイルが小さすぎます"
-    fi
-    
-    log "ダウンロード完了: ${file_size} bytes"
+    log "ダウンロード中: $url"
+    curl -L --progress-bar --retry 3 --retry-delay 5 -o "$output" "$url"
 }
 
-# メイン処理
-install_latest_nvim() {
-    local current_version=""
+# Neovimのインストール
+install_neovim() {
     local latest_version=$(get_latest_nvim_version)
+    log "最新バージョン: $latest_version"
     
-    # 現在のバージョンを確認
-    if command -v nvim &> /dev/null; then
-        current_version=$(nvim --version | head -n1 | grep -o 'v[0-9.]*')
-        log "現在のバージョン: ${current_version}"
-    fi
+    local appimage_url="https://github.com/neovim/neovim/releases/download/${latest_version}/nvim.appimage"
+    local temp_file="/tmp/nvim-${latest_version}.appimage"
     
-    # バージョン比較
-    if [ "$current_version" = "$latest_version" ]; then
-        log "既に最新版 (${latest_version}) がインストールされています"
-        return 0
-    fi
+    download_file "$appimage_url" "$temp_file"
     
-    log "最新版 (${latest_version}) をインストールします"
+    # 実行権限とインストール
+    chmod +x "$temp_file"
     
-    # ダウンロードと検証
-    download_and_verify "$latest_version"
-    
-    # インストール処理
     log "Neovimをインストール中..."
     cd /tmp
+    "$temp_file" --appimage-extract
     
-    # 既存のものをバックアップ
-    if [ -f "/usr/local/bin/nvim" ]; then
-        sudo mv /usr/local/bin/nvim "/usr/local/bin/nvim.backup.$(date +%Y%m%d_%H%M%S)"
-    fi
-    
-    # AppImageを展開してインストール
-    ./nvim.appimage --appimage-extract
     sudo mv squashfs-root/usr/bin/nvim /usr/local/bin/nvim
     sudo mv squashfs-root/usr/share/nvim /usr/local/share/nvim
     
     # クリーンアップ
-    rm -rf squashfs-root nvim.appimage
+    rm -rf squashfs-root "$temp_file"
     
-    # インストール確認
-    if command -v nvim &> /dev/null; then
-        local installed_version=$(nvim --version | head -n1 | grep -o 'v[0-9.]*')
-        log "✅ Neovim ${installed_version} のインストールが完了しました"
-    else
-        error "インストールに失敗しました"
+    log "✅ Neovim ${latest_version} のインストール完了"
+}
+
+# LazyVimのインストール
+install_lazyvim() {
+    log "LazyVimをインストール中..."
+    
+    # バックアップ
+    if [ -d "$HOME/.config/nvim" ]; then
+        warning "既存のNeovim設定をバックアップします"
+        mv "$HOME/.config/nvim" "$HOME/.config/nvim.backup.$(date +%Y%m%d_%H%M%S)"
     fi
+    
+    if [ -d "$HOME/.local/share/nvim" ]; then
+        mv "$HOME/.local/share/nvim" "$HOME/.local/share/nvim.backup.$(date +%Y%m%d_%H%M%S)"
+    fi
+    
+    # LazyVimのクローン
+    git clone https://github.com/LazyVim/starter "$HOME/.config/nvim"
+    
+    # 初回起動（プラグイン自動インストール）
+    log "LazyVimの初回セットアップ中..."
+    nvim --headless "+Lazy! sync" +qa
+    
+    log "✅ LazyVimのインストール完了"
+}
+
+# メイン処理
+main() {
+    log "=== LazyVim完全自動インストール開始 ==="
+    
+    # 依存関係
+    install_dependencies
+    
+    # Neovim
+    install_neovim
+    
+    # LazyVim
+    install_lazyvim
+    
+    log ""
+    log "=============================================="
+    log "🎉 インストールが完了しました！"
+    log "起動方法: nvim"
+    log "初回起動時にプラグインが自動インストールされます"
+    log "=============================================="
 }
 
 # 実行
-install_latest_nvim
+main
